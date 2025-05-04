@@ -131,8 +131,8 @@ jobs:
       - name: 准备 AnyKernel3 包
         run: |
           cd kernel_workspace/kernel_platform/dist
-          echo "克隆 AnyKernel3 仓库..."
-          git clone https://github.com/egcd123/AnyKernel3-ace5Pro.git AnyKernel3-no_kpm --depth=1
+          echo "克隆新的 AnyKernel3 仓库..."
+          git clone https://github.com/MAXCUK/MAXCUK-AnyKernel3-ace5Pro.git AnyKernel3-no_kpm --depth=1
           cp Image AnyKernel3-no_kpm/Image
           echo "AnyKernel3 包准备完成"
 
