@@ -1,4 +1,4 @@
-name: ace5pro整合
+name:oneplus_ace5_pro
 on:
   workflow_dispatch:
     inputs:
