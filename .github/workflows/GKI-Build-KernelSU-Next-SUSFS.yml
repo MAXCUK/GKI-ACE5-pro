@@ -1,4 +1,4 @@
-name: ace5pro gki
+name: ace5pro gki max
 on:
   workflow_dispatch:
     inputs:
@@ -46,9 +46,6 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
-      - name: Check disk space
-        run: df -h
-
       - name: Configure Git
         run: |
           git config --global user.name "build"
@@ -57,7 +54,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl build-essential bison flex libssl-dev
+          sudo apt install -y python3 git curl rsync
 
       - name: Install repo tool
         run: |
@@ -78,16 +75,10 @@ jobs:
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           cd ./KernelSU
-          KSU_VERSION=$(expr $(git rev-list --count main) "+" 10606)
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          sed -i "s/DKSU_VERSION ?= 12800/DKSU_VERSION = ${KSU_VERSION}/" kernel/Makefile
-
-      - name: Prepare kernel source
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          make allyesconfig
-          make prepare
-          make scripts
+          export KSU_VERSION=$KSU_VERSION
+          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
       - name: Set up susfs
         run: |
@@ -99,14 +90,14 @@ jobs:
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          
           cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
           cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
           cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
-
+          
           cd ./common
           sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
           sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
-
           patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
           cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           patch -p1 -F 3 < syscall_hooks.patch
@@ -122,10 +113,8 @@ jobs:
           cd kernel_workspace/kernel_platform
           echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-
           echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
           echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
@@ -141,32 +130,58 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
           echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZO=y" >> ./common/arch/arm64/configs/gki_defconfig
-
+          sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
           git add -A && git commit -a -m "BUILD Kernel"
+
+      - name: Add sched_ext
+        run: |
+          cd kernel_workspace/kernel_platform/
+          
+          # 清理旧版本防止冲突
+          [ -d "sched_ext" ] && rm -rf sched_ext
+          
+          # 克隆定制仓库
+          git clone https://github.com/MAXCUK/sched.git -b ext --depth=1
+          
+          # 同步文件到内核目录
+          rsync -av --progress ./sched/ ./common/kernel/sched/ \
+            --exclude=.git \
+            --exclude=README.md
+          
+          # 清理残留文件
+          rm -rf ./sched/.git
+          
+          # 进入内核调度器目录
+          cd common/kernel/sched
+          
+          # 应用关键补丁
+          sed -i.bak '/# include "ext.c"/a\
+# include "hmbird_sched_proc_main.c"\
+#endif\
+\
+#ifdef CONFIG_SLIM_SCHED\
+# include "slim_sysctl.c"' build_policy.c
+          
+          # 验证文件完整性
+          if [[ ! -f "hmbird_sched_proc_main.c" || ! -f "slim_sysctl.c" ]]; then
+            echo "::error::关键调度文件缺失！"
+            exit 1
+          fi
 
       - name: Add make name
         run: |
           cd kernel_workspace/kernel_platform
           sed -i 's/res="\$res\$(cat "\$file")"/res="${{ github.event.inputs.KERNEL_NAME }}"/g' ./common/scripts/setlocalversion
 
-      - name: Clean build cache
-        run: |
-          cd kernel_workspace/kernel_platform
-          tools/bazel clean --expunge
-          rm -rf ~/.cache/bazel
-
       - name: Build kernel
         run: |
           cd kernel_workspace/kernel_platform
-          export BAZEL_BUILD_OPTS="--subcommands --verbose_failures"
-          tools/bazel run $BAZEL_BUILD_OPTS --config=local --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
+          tools/bazel run --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
 
       - name: Generate Kernel Images
         run: |
@@ -186,7 +201,7 @@ jobs:
           rm -rf AnyKernel3-{kpm,no_kpm}/.git
           rm -f AnyKernel3-{kpm,no_kpm}/push.sh
 
-      - name: Copy Kernel Images
+      - name: Copy kernel images
         run: |
           cd kernel_workspace/kernel_platform/dist
           cp Image AnyKernel3-no_kpm/Image       
@@ -203,3 +218,4 @@ jobs:
         with:
           name: AnyKernel3_oneplus_ace5_pro_${{ env.KSUVER }}_kpm
           path: kernel_workspace/kernel_platform/dist/AnyKernel3-kpm/*
+
