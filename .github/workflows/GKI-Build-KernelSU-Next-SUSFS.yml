@@ -1,4 +1,4 @@
-name: ace5pro gki max
+name: ace5pro gki
 on:
   workflow_dispatch:
     inputs:
