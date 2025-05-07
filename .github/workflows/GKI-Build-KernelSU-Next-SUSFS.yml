@@ -50,15 +50,34 @@ jobs:
           git config --global user.name "build"
           git config --global user.email "2106456897@qq.com"
 
-      - name: Setup SSH Keys
+      - name: Setup SSH Environment
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          # 严格处理密钥格式
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | sed '/^$/d' > ~/.ssh/id_ed25519
           chmod 700 ~/.ssh
-          chmod 600 ~/.ssh/id_ed25519
-          echo "Host github.com" >> ~/.ssh/config
-          echo "  IdentityFile ~/.ssh/id_ed25519" >> ~/.ssh/config
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/*
+          
+          # 生成增强SSH配置
+          cat << EOF > ~/.ssh/config
+          Host github.com
+              HostName github.com
+              User git
+              IdentityFile ~/.ssh/id_ed25519
+              IdentitiesOnly yes
+              StrictHostKeyChecking no
+              PubkeyAcceptedAlgorithms +ssh-ed25519
+              HostkeyAlgorithms +ssh-ed25519
+          EOF
+          
+          # 预加载GitHub指纹
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+          
+          # 连接测试
+          echo "=== SSH连接测试 ==="
+          ssh -T git@github.com || true
+          echo "=== 仓库访问验证 ==="
+          git ls-remote git@github.com:MAXCUK/sched.git HEAD
 
       - name: Install dependencies
         run: |
@@ -67,26 +86,27 @@ jobs:
 
       - name: Install repo tool
         run: |
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
           chmod a+x ~/repo
           sudo mv ~/repo /usr/local/bin/repo
 
       - name: Initialize repo and sync
         run: |
           mkdir kernel_workspace && cd kernel_workspace
-          repo init -u https://github.com/JiuGeFaCai/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          repo --trace sync -c -j$(nproc --all) --no-tags
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          repo init -u https://github.com/JiuGeFaCai/kernel_manifest.git \
+            -b refs/heads/oneplus/${{ github.event.inputs.CPU }} \
+            -m ${{ github.event.inputs.FEIL }}.xml \
+            --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* 2>/dev/null || true
 
       - name: Set up SukiSU
         run: |
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+          KSU_VERSION=$(expr $(git rev-list --count main) "+" 10606)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
 
       - name: Set up susfs
@@ -97,22 +117,17 @@ jobs:
 
           cd kernel_platform        
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          #lz4k
+          cp -r ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -r ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
           cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
           cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
-          # Apply patches
+
           cd ./common
-
           sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
-          sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
-
           patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
           cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           patch -p1 -F 3 < syscall_hooks.patch
-          echo "完成"
 
       - name: Apply lz4kd Patches
         run: |
@@ -123,40 +138,35 @@ jobs:
       - name: Add SUSFS Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-
-          # Add VFS configuration settings
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # Add SUSFS configuration settings
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
-         
-          # Remove check_defconfig
+          {
+            echo "CONFIG_KSU=y";
+            echo "CONFIG_KPM=y";
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n";
+            echo "CONFIG_KSU_MANUAL_HOOK=y";
+            echo "CONFIG_KSU_SUSFS=y";
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y";
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y";
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y";
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y";
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y";
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y";
+            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n";
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y";
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y";
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y";
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y";
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y";
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y";
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y";
+            echo "CONFIG_CRYPTO_LZ4HC=y";
+            echo "CONFIG_CRYPTO_LZ4K=y";
+            echo "CONFIG_CRYPTO_LZ4KD=y";
+            echo "CONFIG_CRYPTO_842=y";
+          } >> ./common/arch/arm64/configs/gki_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
-          git add -A && git commit -a -m "BUILD Kernel"
-          
+          git add -A && git commit -a -m "BUILD: Apply kernel configs"
+
       - name: Add make name
         run: |
           cd kernel_workspace/kernel_platform
@@ -165,27 +175,34 @@ jobs:
       - name: Configure sched_ext Driver
         run: |
           cd kernel_workspace/kernel_platform/common/kernel/sched
-          if [[ ! -f "slim_sysctl.c" || ! -f "hmbird_sched_proc_main.c" ]]; then
+          if [[ ! -f "slim_sysctl.c" ]]; then
               tmp_dir=$(mktemp -d)
-              git clone git@github.com:MAXCUK/sched.git "$tmp_dir"
-              find "$tmp_dir" -type f \( -name "*.c" -o -name "*.h" \) -exec cp -v --backup=numbered {} . \;
+              echo "正在克隆私有仓库..."
+              GIT_SSH_COMMAND="ssh -v" git clone git@github.com:MAXCUK/sched.git "$tmp_dir"
+              find "$tmp_dir" -name "*.c" -exec cp -v {} . \;
               rm -rf "$tmp_dir"
           fi
-          echo "sched_ext配置完成"
 
       - name: Build kernel
         run: |
           cd kernel_workspace/kernel_platform
-          tools/bazel run --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
+          tools/bazel run \
+            --config=fast \
+            --config=stamp \
+            --lto=thin \
+            //common:kernel_aarch64_dist \
+            -- \
+            --dist_dir=dist
 
-      - name: Generate Kernel lmages
+      - name: Generate Kernel Images
         run: |
           cd kernel_workspace/kernel_platform/dist
           cp Image Image_original
-          curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+          curl -fL -o patch_linux \
+            https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
           chmod +x patch_linux
           ./patch_linux
-          mv oImage Image_kpm     
+          mv oImage Image_kpm
           mv Image_original Image
 
       - name: Prepare AnyKernel3 Packages
@@ -194,22 +211,17 @@ jobs:
           git clone git@github.com:MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-no_kpm --depth=1
           git clone git@github.com:MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-kpm --depth=1
           rm -rf AnyKernel3-{kpm,no_kpm}/.git
-          rm -f AnyKernel3-{kpm,no_kpm}/push.sh
+          find AnyKernel3-{kpm,no_kpm} -name "push.sh" -delete
 
-      - name: 复制镜像到对应目录并统一命名为 lmage
+      - name: 复制镜像文件
         run: |
           cd kernel_workspace/kernel_platform/dist
-          cp Image AnyKernel3-no_kpm/Image       
-          cp Image_kpm AnyKernel3-kpm/Image
-            
-      - name: Upload AnyKernel3 (no_KPM)
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3_oneplus_ace5_pro_${{ env.KSUVER }}_no_kpm
-          path: kernel_workspace/kernel_platform/dist/AnyKernel3-no_kpm/*
+          cp -v Image AnyKernel3-no_kpm/
+          cp -v Image_kpm AnyKernel3-kpm/
 
-      - name: Upload AnyKernel3 (KPM)
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_oneplus_ace5_pro_${{ env.KSUVER }}_kpm
-          path: kernel_workspace/kernel_platform/dist/AnyKernel3-kpm/*
+          name: kernel_${{ env.KSUVER }}
+          path: |
+            kernel_workspace/kernel_platform/dist/AnyKernel3-*
