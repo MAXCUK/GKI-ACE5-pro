@@ -1,212 +1,138 @@
-name: ace5pro整合
+name: OnePlus_13T_Kernel_Full_Build
 on:
   workflow_dispatch:
     inputs:
-      CPU:
-        description: "分支"
+      DEVICE_MODEL:
+        description: "设备型号 (必须与manifest匹配)"
         required: true
-        default: 'sm8750'
-      FEIL:
-        description: "配置文件"
-        required: true
-        default: 'oneplus_ace5_pro'
-      CPUD:
-        description: "处理器代号"
+        default: 'oneplus_13t'
+      HARDWARE_CODE:
+        description: "硬件代号 (sun/star)"
         required: true
         default: 'sun'
-      ANDROID_VERSION:
-        description: "内核安卓版本"
+      BUILD_PROFILE:
+        description: "编译配置 (perf/debug)"
         required: true
-        default: 'android15'
-      KERNEL_VERSION:
-        description: "内核版本"
-        required: true
-        default: '6.6'
-      KERNEL_NAME:
-        description: "修改内核名称"
-        required: true
-        default: '-android15-8-g013ec21bba94-abogki383916444'
+        default: 'perf'
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  full_build:
+    runs-on: ubuntu-22.04
     env:
-      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
-      CCACHE_NOHASHDIR: "true"
-      CCACHE_HARDLINK: "true"
+      KERNEL_ROOT: ${{ github.workspace }}/kernel_platform
+      BUILD_OUTPUT: ${{ github.workspace }}/out
+
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          
-      - name: Configure Git
-        run: |
-          git config --global user.name "build"
-          git config --global user.email "2106456897@qq.com"
+    # ==================== 环境准备阶段 ====================
+    - name: 安装系统依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          git-core gnupg flex bison build-essential zip \
+          curl zlib1g-dev libc6-dev-i386 libxml2-utils \
+          xsltproc unzip python3-pip ccache bc libssl-dev \
+          make gcc clang llvm lz4 liblz4-dev
 
-      - name: Install dependencies
-        run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl ssh-client
+    - name: 配置Python环境
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install pycryptodome requests
 
-      - name: Install repo tool
-        run: |
-          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
-          chmod a+x ~/repo
-          sudo mv ~/repo /usr/local/bin/repo
+    # ==================== 源码获取阶段 ====================
+    - name: 初始化repo工具
+      run: |
+        mkdir -p ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
 
-      - name: Set up SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          eval "$(ssh-agent -s)"
-          ssh-add ~/.ssh/id_ed25519
+    - name: 同步仓库源码
+      run: |
+        mkdir kernel_build && cd kernel_build
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+          -b onep \
+          -m ${{ inputs.DEVICE_MODEL }}.xml \
+          --depth=1 \
+          --no-repo-verify
+        repo sync \
+          -c \
+          -j$(nproc --all) \
+          --no-tags \
+          --no-clone-bundle \
+          --optimized-fetch
 
-      - name: Initialize repo and sync
-        run: |
-          mkdir kernel_workspace && cd kernel_workspace
-          repo init -u https://github.com/JiuGeFaCai/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          repo --trace sync -c -j$(nproc --all) --no-tags
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-         
-      - name: Set up SukiSU
-        run: |
-          cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
-          cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
-          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
-        
-      - name: Set up susfs
-        run: |
-          cd kernel_workspace
-          git clone git@github.com:ExmikoN/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
-          git clone git@github.com:ExmikoN/SukiSU_patch.git
+    # ==================== 源码补丁阶段 ====================
+    - name: 应用官方硬件补丁
+      run: |
+        cd $KERNEL_ROOT/oplus/build/patches
+        find . -name "*.patch" -exec git apply {} \;
 
-          cd kernel_platform        
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
-          #lz4k
-          cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
-          cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
-          cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
-          # Apply patches
-          cd ./common
+    - name: 部署KernelSU
+      run: |
+        cd $KERNEL_ROOT
+        curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+        sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=10606/" KernelSU/kernel/Makefile
 
-          sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
-          sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
+    - name: 集成SUSFS文件系统
+      run: |
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git $KERNEL_ROOT/susfs
+        cp -rv $KERNEL_ROOT/susfs/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch $KERNEL_ROOT/common/
+        cp -rv $KERNEL_ROOT/susfs/kernel_patches/fs/* $KERNEL_ROOT/common/fs/
+        cp -rv $KERNEL_ROOT/susfs/kernel_patches/include/linux/* $KERNEL_ROOT/common/include/linux/
 
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
-          cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
-          patch -p1 -F 3 < syscall_hooks.patch
-          echo "完成"
+    - name: 应用lz4k压缩优化
+      run: |
+        cd $KERNEL_ROOT/common
+        curl -L https://github.com/ExmikoN/SukiSU_patch/raw/main/other/lz4k_patch/6.6/lz4kd.patch | patch -p1 -F 3
 
-      - name: Apply lz4kd Patches
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./
-          patch -p1 -F 3 < lz4kd.patch || true
-           
-      - name: Add SUSFS Configuration Settings
-        run: |
-          cd kernel_workspace/kernel_platform
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+    # ==================== 内核配置阶段 ====================
+    - name: 修改defconfig配置
+      run: |
+        echo "CONFIG_KSU=y" >> $KERNEL_ROOT/common/arch/arm64/configs/gki_defconfig
+        echo "CONFIG_KSU_SUSFS=y" >> $KERNEL_ROOT/common/arch/arm64/configs/gki_defconfig
+        sed -i '/check_defconfig/d' $KERNEL_ROOT/common/build.config.gki
 
-          # Add VFS configuration settings
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # Add SUSFS configuration settings
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
-         
-          # Remove check_defconfig
-          sed -i 's/check_defconfig//' ./common/build.config.gki
-          cd common
-          git add -A && git commit -a -m "BUILD Kernel"
-          
-      - name: Add make name
-        run: |
-          cd kernel_workspace/kernel_platform
-          sed -i 's/res="\$res\$(cat "\$file")"/res="${{ github.event.inputs.KERNEL_NAME }}"/g' ./common/scripts/setlocalversion
+    - name: 定制内核版本信息
+      run: |
+        sed -i 's|res="\$res\$(cat "\$file")"|res="-android15-8-@"|g' $KERNEL_ROOT/common/scripts/setlocalversion
 
-      - name: Add sched_ext
-        run: |
-          cd kernel_workspace/kernel_platform/
-          git clone git@github.com:MAXCUK/sched.git
-          cp -r ./sched/* ./common/kernel/sched
-          rm -rf ./sched/.git
-          cd common/kernel/sched
-          sed -i.bak '/# include "ext.c"/a\# include "hmbird_sched_proc_main.c"\n#endif\n\n#ifdef CONFIG_SLIM_SCHED\n# include "slim_sysctl.c"' build_policy.c
-         
-      - name: Build kernel
-        run: |
-          cd kernel_workspace/kernel_platform
-          tools/bazel run --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
+    # ==================== 编译构建阶段 ====================
+    - name: 执行官方编译命令
+      run: |
+        cd $KERNEL_ROOT/oplus/build
+        chmod +x oplus_build_kernel.sh
+        ./oplus_build_kernel.sh ${{ inputs.HARDWARE_CODE }} ${{ inputs.BUILD_PROFILE }}
+        mkdir -p $BUILD_OUTPUT
+        cp ../out/android*/Image $BUILD_OUTPUT/
 
-      - name: Generate Kernel lmages
-        run: |
-          cd kernel_workspace/kernel_platform/dist
-          cp Image Image_original
-          curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
-          chmod +x patch_linux
-          ./patch_linux
-          mv oImage Image_kpm     
-          mv Image_original Image
+    # ==================== 镜像处理阶段 ====================
+    - name: 生成KPM镜像
+      run: |
+        cd $BUILD_OUTPUT
+        curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+        chmod +x patch_linux
+        ./patch_linux
+        mv oImage Image_kpm
 
-      - name: Prepare AnyKernel3 Packages
-        run: |
-          cd kernel_workspace/kernel_platform/dist
-          git clone git@github.com:MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-no_kpm --depth=1
-          git clone git@github.com:MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-kpm --depth=1
-          rm -rf AnyKernel3-{kpm,no_kpm}/.git
-          rm -f AnyKernel3-{kpm,no_kpm}/push.sh
-    
-      - name: 复制镜像到对应目录并统一命名为 lmage
-        run: |
-          cd kernel_workspace/kernel_platform/dist
-          cp Image AnyKernel3-no_kpm/Image       
-          cp Image_kpm AnyKernel3-kpm/Image
-            
-      - name: Upload AnyKernel3 (no_KPM)
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3_oneplus_ace5_pro_${{ env.KSUVER }}_no_kpm
-          path: kernel_workspace/kernel_platform/dist/AnyKernel3-no_kpm/*
-         
-      - name: Upload AnyKernel3 (KPM)
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3_oneplus_ace5_pro_${{ env.KSUVER }}_kpm
-          path: kernel_workspace/kernel_platform/dist/AnyKernel3-kpm/*
+    - name: 准备AnyKernel3模板
+      run: |
+        cd $BUILD_OUTPUT
+        git clone https://${{ secrets.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3
+        rm -rf AnyKernel3/.git
+        cp Image* AnyKernel3/
+        echo "Device: ${{ inputs.DEVICE_MODEL }}" > AnyKernel3/device.info
+        echo "BuildTime: $(date '+%Y%m%d-%H%M%S')" >> AnyKernel3/version
+
+    # ==================== 产物归档阶段 ====================
+    - name: 生成压缩包
+      run: |
+        cd $BUILD_OUTPUT/AnyKernel3
+        zip -r9 ../OnePlus13T_Kernel_${{ inputs.HARDWARE_CODE }}_${{ inputs.BUILD_PROFILE }}.zip *
+
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: OnePlus13T_${{ inputs.HARDWARE_CODE }}_${{ inputs.BUILD_PROFILE }}
+        path: |
+          $BUILD_OUTPUT/Image*
+          $BUILD_OUTPUT/*.zip
