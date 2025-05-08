@@ -53,7 +53,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl
+          sudo apt install -y python3 git curl ccache
 
       - name: Install repo tool
         run: |
@@ -74,7 +74,7 @@ jobs:
           cd kernel_workspace/kernel_platform
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
+          KSU_VERSION=$(expr $(git rev-list --count main) "+" 10606)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           export KSU_VERSION=$KSU_VERSION
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
@@ -82,56 +82,87 @@ jobs:
       - name: Set up susfs
         run: |
           cd kernel_workspace
+          # 清理旧补丁
+          rm -rf susfs4ksu SukiSU_patch
+          
+          # 克隆最新补丁
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
           git clone https://github.com/ExmikoN/SukiSU_patch.git
 
-          cd kernel_platform        
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
-          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          # 部署补丁文件
+          cd kernel_platform
+          cp -f ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
+          cp -rf ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -rf ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           
-          # 应用补丁
+          # 应用LZ4K基础补丁
+          cp -rf ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
+          cp -rf ../SukiSU_patch/other/lz4k/lib/* ./common/lib
+          cp -rf ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
+
+          # 处理核心补丁
           cd ./common
           sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
           sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
+          
+          # 应用系统调用钩子
           cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           patch -p1 -F 3 < syscall_hooks.patch
+
+      - name: Apply lz4kd Patches
+        run: |
+          cd kernel_workspace/kernel_platform/common
+          cp ../../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./
+          patch -p1 -F 3 < lz4kd.patch
 
       - name: 内核配置增强
         run: |
           cd kernel_workspace/kernel_platform
-          # 添加KernelSU核心配置
-          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # SUSFS高级配置
-          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # 修复defconfig检查
+          # 注入SUSFS配置
+          cat <<EOT >> ./common/arch/arm64/configs/gki_defconfig
+# KernelSU
+CONFIG_KSU=y
+CONFIG_KPM=y
+
+# SUSFS核心功能
+CONFIG_KSU_SUSFS=y
+CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+CONFIG_KSU_SUSFS_SUS_PATH=y
+CONFIG_KSU_SUSFS_SUS_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+
+# 高级功能配置
+CONFIG_KSU_SUSFS_SUS_SU=n
+CONFIG_KSU_MANUAL_HOOK=y
+CONFIG_KSU_SUSFS_SUS_KSTAT=y
+CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+CONFIG_KSU_SUSFS_ENABLE_LOG=y
+CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+
+# 压缩算法支持
+CONFIG_CRYPTO_LZ4HC=y
+CONFIG_CRYPTO_LZ4K=y
+CONFIG_CRYPTO_LZ4KD=y
+CONFIG_CRYPTO_842=y
+
+# 系统优化
+CONFIG_DTBO_VALIDATION=n
+EOT
+
+          # 绕过配置检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
           cd common
-          git add -A && git commit -a -m "[SukiSU] Kernel Configuration"
+          git add -A && git commit -a -m "[SukiSU] 完整内核配置"
 
       - name: 内核标识定制
         run: |
           cd kernel_workspace/kernel_platform
-          # 修改内核版本显示
           sed -i 's/res="\$res\$(cat "\$file")"/res="${{ github.event.inputs.KERNEL_NAME }}"/g' ./common/scripts/setlocalversion
 
       - name: 编译内核
