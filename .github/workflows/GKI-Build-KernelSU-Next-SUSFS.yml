@@ -154,7 +154,7 @@ jobs:
       - name: 集成sched_ext
         run: |
           cd kernel_workspace/kernel_platform/
-          git clone https://github.com/egcd123/sched_ext.git
+          git clone https://github.com/MAXCUK/sched_ext.git
           cp -r ./sched_ext/* ./common/kernel/sched
           rm -rf ./sched_ext/.git
           cd common/kernel/sched
@@ -178,8 +178,8 @@ jobs:
       - name: 准备刷机包
         run: |
           cd kernel_workspace/kernel_platform/dist
-          git clone https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-no_kpm --depth=1
-          git clone https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-kpm --depth=1
+          git clone https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-13t.git AnyKernel3-no_kpm --depth=1
+          git clone https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-13t.git AnyKernel3-kpm --depth=1
           rm -rf AnyKernel3-{kpm,no_kpm}/.git
           cp Image AnyKernel3-no_kpm/Image
           cp Image_kpm AnyKernel3-kpm/Image
