@@ -90,11 +90,6 @@ jobs:
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           
-          # 应用LZ4K补丁
-          cp -r ../SukiSU_patch/other/lz4k/include/linux/* ./common/include/linux
-          cp -r ../SukiSU_patch/other/lz4k/lib/* ./common/lib
-          cp -r ../SukiSU_patch/other/lz4k/crypto/* ./common/crypto
-          
           # 应用补丁
           cd ./common
           sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch
@@ -102,12 +97,6 @@ jobs:
           patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
           cp ../../SukiSU_patch/hooks/syscall_hooks.patch ./
           patch -p1 -F 3 < syscall_hooks.patch
-
-      - name: Apply lz4kd Patches
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          cp ../../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./
-          patch -p1 -F 3 < lz4kd.patch || true
 
       - name: 内核配置增强
         run: |
@@ -133,12 +122,6 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          
-          # 压缩算法支持
-          echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
           
           # 修复defconfig检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
