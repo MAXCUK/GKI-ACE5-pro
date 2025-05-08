@@ -64,7 +64,8 @@ jobs:
             libssl-dev \
             bc \
             flex \
-            bison
+            bison \
+            rsync
 
       - name: 初始化Repo环境
         run: |
@@ -76,8 +77,8 @@ jobs:
 
           repo init \
             -u https://github.com/MAXCUK/kernel_manifest.git \
-            -b refs/heads/oneplus/${{ inputs.CPU }} \
-            -m ${{ inputs.FEIL }}.xml \
+            -b refs/heads/oneplus/${{ github.event.inputs.CPU }} \
+            -m ${{ github.event.inputs.FEIL }}.xml \
             --depth=1 \
             --repo-url=https://gerrit.googlesource.com/git-repo
 
@@ -104,24 +105,32 @@ jobs:
       - name: 部署SUSFS
         run: |
           cd kernel_workspace
-          git clone --depth 1 --branch gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }} \
+          git clone --depth 1 --branch gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} \
             https://gitlab.com/simonpunk/susfs4ksu.git
           git clone --depth 1 https://github.com/ExmikoN/SukiSU_patch.git
 
-          # 复制补丁文件
-          cp -v susfs4ksu/kernel_patches/fs/* kernel_platform/common/fs/
-          cp -v susfs4ksu/kernel_patches/include/linux/* kernel_platform/common/include/linux/
-          cp -v SukiSU_patch/other/lz4k/{include/linux/*,lib/*,crypto/*} kernel_platform/common/
+          # 创建目录结构
+          mkdir -p kernel_platform/common/{fs,include/linux,lib/lz4k,lib/lz4kd,crypto}
 
-          # 应用主补丁
+          # 复制SUSFS文件
+          rsync -av susfs4ksu/kernel_patches/fs/ kernel_platform/common/fs/
+          rsync -av susfs4ksu/kernel_patches/include/linux/ kernel_platform/common/include/linux/
+
+          # 复制LZ4K组件
+          rsync -av SukiSU_patch/other/lz4k/include/linux/ kernel_platform/common/include/linux/
+          rsync -av SukiSU_patch/other/lz4k/lib/ kernel_platform/common/lib/
+          rsync -av SukiSU_patch/other/lz4k/crypto/ kernel_platform/common/crypto/
+
+          # 应用补丁
           cd kernel_platform/common
+          cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_gki-*.patch .
           patch -p1 --ignore-whitespace < 50_add_susfs_in_gki-*.patch || true
           patch -p1 -F3 < ../../SukiSU_patch/hooks/syscall_hooks.patch
 
       - name: 应用LZ4K补丁
         run: |
           cd kernel_workspace/kernel_platform/common
-          patch -p1 -F3 < ../../SukiSU_patch/other/lz4k_patch/${{ inputs.KERNEL_VERSION }}/lz4kd.patch || :
+          patch -p1 -F3 < ../../SukiSU_patch/other/lz4k_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch || :
 
       - name: 配置内核参数
         run: |
@@ -129,15 +138,18 @@ jobs:
           CONFIG_FILE="common/arch/arm64/configs/gki_defconfig"
 
           # 核心配置
-          for config in \
-            "CONFIG_KSU=y" \
-            "CONFIG_KPM=y" \
-            "CONFIG_KSU_SUSFS=y" \
-            "CONFIG_CRYPTO_LZ4HC=y" \
-            "CONFIG_CRYPTO_LZ4K=y" \
-            "CONFIG_CRYPTO_LZ4KD=y" \
-            "CONFIG_CRYPTO_842=y"; do
-            grep -qF "$config" "$CONFIG_FILE" || echo "$config" >> "$CONFIG_FILE"
+          declare -A CONFIG_MAP=(
+            ["KSU"]=y
+            ["KPM"]=y
+            ["KSU_SUSFS"]=y
+            ["CRYPTO_LZ4HC"]=y
+            ["CRYPTO_LZ4K"]=y
+            ["CRYPTO_LZ4KD"]=y
+            ["CRYPTO_842"]=y
+          )
+
+          for key in "${!CONFIG_MAP[@]}"; do
+            grep -qF "CONFIG_${key}=${CONFIG_MAP[$key]}" "$CONFIG_FILE" || echo "CONFIG_${key}=${CONFIG_MAP[$key]}" >> "$CONFIG_FILE"
           done
 
           # 移除配置检查
@@ -148,14 +160,14 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform
           sed -i \
-            -e 's|res="\$res\$(cat "\$file")"|res="${{ inputs.KERNEL_NAME }}"|g' \
+            -e 's|res="\$res\$(cat "\$file")"|res="${{ github.event.inputs.KERNEL_NAME }}"|g' \
             common/scripts/setlocalversion
 
       - name: 整合调度扩展
         run: |
           cd kernel_workspace/kernel_platform
           git clone --depth 1 https://github.com/egcd123/sched_ext.git
-          cp -a sched_ext/* common/kernel/sched/
+          rsync -a sched_ext/ common/kernel/sched/
           
           sed -i.bak $'/^# include "ext.c"/a\\\n# include "hmbird_sched_proc_main.c"\\\n#endif\\\n\\\n#ifdef CONFIG_SLIM_SCHED\\\n# include "slim_sysctl.c"' \
             common/kernel/sched/build_policy.c
@@ -163,7 +175,7 @@ jobs:
       - name: 编译内核
         run: |
           cd kernel_workspace/kernel_platform
-          ccache -M 2G
+          ccache -M 4G
           ccache -s
           
           tools/bazel run \
@@ -193,6 +205,7 @@ jobs:
               "AnyKernel3-${variant}"
             rm -rf "AnyKernel3-${variant}/.git"
             cp Image${variant/_kpm/} "AnyKernel3-${variant}/Image"
+            (cd "AnyKernel3-${variant}" && zip -r9 "../AnyKernel3_${variant}.zip" ./*)
           done
 
       - name: 上传构建产物
@@ -200,5 +213,4 @@ jobs:
         with:
           name: OnePlus_Ace5Pro_Kernel_${{ env.KSUVER }}
           path: |
-            kernel_workspace/kernel_platform/dist/AnyKernel3-*/Image
-            kernel_workspace/kernel_platform/dist/Image*
+            kernel_workspace/kernel_platform/dist/AnyKernel3_*.zip
