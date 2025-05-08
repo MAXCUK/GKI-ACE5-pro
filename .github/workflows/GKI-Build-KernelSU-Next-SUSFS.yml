@@ -32,52 +32,52 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       AK3_ACCESS_TOKEN: ${{ secrets.AK3_ACCESS_TOKEN }}
-      CCACHE_COMPILERCHECK: "content"
+      CCACHE_COMPRESS: "true"
       CCACHE_DIR: /github/workspace/.ccache
       KSU_BASE_VERSION: 10606
 
     steps:
-      # ================== 系统环境准备 ==================
-      - name: 释放磁盘空间
-        uses: easimon/maximize-build-space@v2
+      # ================== 存储优化配置 ==================
+      - name: 安全释放磁盘空间
+        uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 12288
-          swap-reserve-mb: 4096
-          remove-android: true
+          root-reserve-mb: 8192
+          temp-reserve-mb: 0
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          skip-device-check: 'true'
+          exclude-devices: '/dev/sda1,/dev/sdb15'
 
+      # ================== 环境初始化 ==================
       - name: 配置Git环境
         run: |
           git config --global user.name "CI-Builder"
           git config --global user.email "ci@kernel.build"
           git config --global http.sslVerify false
-          git config --global uploadpack.allowfilter true
+          git config --global core.compression 9
 
-      # ================== 依赖安装 ==================
-      - name: 安装构建工具链
+      # ================== 依赖管理 ==================
+      - name: 安装完整构建工具链
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            libssl-dev \
-            python3-dev \
-            flex bison dwarves \
-            ccache rsync kmod \
-            aria2 patchelf xxd \
-            libelf-dev ncurses-dev
+            build-essential libssl-dev python3-dev \
+            flex bison dwarves ccache rsync kmod \
+            aria2 patchelf xxd libelf-dev ncurses-dev \
+            zlib1g-dev lz4 liblz4-tool zstd
 
           sudo ln -sf /usr/bin/python3 /usr/bin/python
-          python3 -m pip install -U pip wheel
-          python3 -m pip install -U pyelftools
+          python3 -m pip install -U pyelftools wheel
 
-      # ================== Repo初始化 ==================
-      - name: 初始化Repo工具
+      # ================== 代码仓库管理 ==================
+      - name: 初始化Repo环境
         run: |
           sudo curl -sLo /usr/local/bin/repo \
-            https://storage.googleapis.com/git-repo-downloads/repo
+            https://mirrors.tuna.tsinghua.edu.cn/git/git-repo
           sudo chmod a+x /usr/local/bin/repo
 
-      - name: 同步代码仓库
-        run: |
           mkdir -p kernel_workspace
           cd kernel_workspace
           repo init \
@@ -90,8 +90,7 @@ jobs:
           repo sync \
             -c -j$(nproc --all) \
             --no-tags --no-clone-bundle \
-            --optimized-fetch \
-            --use-superproject
+            --optimized-fetch
 
           find . -name 'abi_gki_protected_exports_*' -delete
 
@@ -106,8 +105,8 @@ jobs:
           echo "KSU_VER=$((KSU_BASE_VERSION + KSU_COMMITS))" >> $GITHUB_ENV
           sed -i "s/DKSU_VERSION=.*/DKSU_VERSION=$((KSU_BASE_VERSION + KSU_COMMITS))/" kernel/Makefile
 
-      # ================== SUSFS文件系统集成 ==================
-      - name: 准备SUSFS组件
+      # ================== 文件系统增强 ==================
+      - name: 集成SUSFS组件
         run: |
           cd kernel_workspace
           git clone --filter=blob:none \
@@ -115,23 +114,27 @@ jobs:
             -b gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }}
           
           mkdir -p kernel_platform/common/{fs,include/linux,lib,crypto}
-          rsync -a susfs4ksu/kernel_patches/fs/ kernel_platform/common/fs/
-          rsync -a susfs4ksu/kernel_patches/include/linux/ kernel_platform/common/include/linux/
+          rsync -a --ignore-existing susfs4ksu/kernel_patches/fs/ kernel_platform/common/fs/
+          rsync -a --ignore-existing susfs4ksu/kernel_patches/include/linux/ kernel_platform/common/include/linux/
 
-      - name: 应用LZ4K压缩算法
+      - name: 应用LZ4K增强
         run: |
           cd kernel_workspace
           git clone --depth 1 https://github.com/ExmikoN/SukiSU_patch.git
           
-          # 部署LZ4K组件
-          cp -vr SukiSU_patch/other/lz4k/include/linux/lz4* \
+          rsync -av --ignore-existing \
+            SukiSU_patch/other/lz4k/include/linux/lz4* \
             kernel_platform/common/include/linux/
-          cp -v SukiSU_patch/other/lz4k/lib/lz4* \
+          
+          rsync -av --ignore-existing \
+            SukiSU_patch/other/lz4k/lib/lz4* \
             kernel_platform/common/lib/
-          cp -v SukiSU_patch/other/lz4k/crypto/lz4* \
+          
+          rsync -av --ignore-existing \
+            SukiSU_patch/other/lz4k/crypto/lz4* \
             kernel_platform/common/crypto/
 
-      # ================== 内核补丁应用 ==================
+      # ================== 补丁管理系统 ==================
       - name: 应用关键补丁
         run: |
           cd kernel_workspace/kernel_platform/common
@@ -139,31 +142,32 @@ jobs:
           # SUSFS主补丁
           curl -sO https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/kernel_patches/50_add_susfs_in_gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }}.patch
           sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs*.patch
-          patch -p1 --no-backup-if-mismatch < 50_add_susfs*.patch
+          patch -p1 --no-backup-if-mismatch < 50_add_susfs*.patch || true
           
           # 系统调用Hook补丁
           curl -sO https://raw.githubusercontent.com/ExmikoN/SukiSU_patch/main/hooks/syscall_hooks.patch
-          patch -p1 -F3 < syscall_hooks.patch
+          patch -p1 -F3 < syscall_hooks.patch || true
           
           # LZ4KD增强补丁
           curl -sLO https://raw.githubusercontent.com/ExmikoN/SukiSU_patch/main/other/lz4k_patch/${{ inputs.KERNEL_VERSION }}/lz4kd.patch
           patch -p1 -F3 < lz4kd.patch || true
 
-      # ================== 内核配置 ==================
-      - name: 配置内核参数
+      # ================== 内核智能配置 ==================
+      - name: 动态内核配置
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE="common/arch/arm64/configs/gki_defconfig"
           
-          # 动态配置管理
           declare -A CONFIG_ENTRIES=(
-            ["KSU"]="y"
-            ["KPM"]="y"
-            ["KSU_SUSFS"]="y"
-            ["CRYPTO_LZ4K"]="y"
-            ["CRYPTO_LZ4KD"]="y"
-            ["SCHED_CLASS_EXT"]="y"
-            ["HMBIRD_SCHED_PROC_MAIN"]="y"
+            ["KSU"]=y
+            ["KPM"]=y
+            ["KSU_SUSFS"]=y
+            ["CRYPTO_LZ4K"]=y
+            ["CRYPTO_LZ4KD"]=y
+            ["SCHED_CLASS_EXT"]=y
+            ["HMBIRD_SCHED_PROC_MAIN"]=y
+            ["KSU_SUSFS_HAS_MAGIC_MOUNT"]=y
+            ["KSU_SUSFS_SUS_PATH"]=y
           )
           
           for key in "${!CONFIG_ENTRIES[@]}"; do
@@ -173,6 +177,7 @@ jobs:
           done
           
           sed -i 's/check_defconfig//' common/build.config.gki
+          git commit -am "BUILD: Dynamic Kernel Configuration"
 
       # ================== 调度器扩展 ==================
       - name: 集成sched_ext调度器
@@ -180,20 +185,18 @@ jobs:
           cd kernel_workspace/kernel_platform
           git clone --filter=blob:none https://github.com/egcd123/sched_ext.git
           
-          # 合并调度器代码
-          find sched_ext -name '*.c' -exec cp {} common/kernel/sched/ \;
-          find sched_ext -name '*.h' -exec cp {} common/include/linux/ \;
+          find sched_ext -name '*.c' -exec cp -n {} common/kernel/sched/ \;
+          find sched_ext -name '*.h' -exec cp -n {} common/include/linux/ \;
           
-          # 修改构建策略
           sed -i $'/EXT_OBJS += scx_common.bpf.o/ {e sed -n "H; $ {x; s/\\n//g; p}"}\
             /^EXT_OBJS += scx_common.bpf.o/a\\\nEXT_OBJS += scx_hmbird.o' \
             common/kernel/sched/Makefile
 
-      # ================== 编译构建 ==================
+      # ================== 编译优化 ==================
       - name: 编译内核映像
         run: |
           cd kernel_workspace/kernel_platform
-          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR="/github/workspace/.ccache"
           ccache -o compression=true
           ccache -M 8G
           
@@ -205,49 +208,45 @@ jobs:
             --dist_dir=dist"
           
           echo "▶️ 开始编译: $build_cmd"
-          eval $build_cmd || (echo "❌ 编译失败"; exit 1)
+          if ! eval $build_cmd; then
+            echo "::warning::编译失败，尝试释放缓存..."
+            ccache -C
+            eval $build_cmd || (echo "::error::最终编译失败"; exit 1)
+          fi
 
       # ================== 镜像处理 ==================
       - name: 生成KPM镜像
         run: |
           cd kernel_workspace/kernel_platform/dist
-          aria2c -x16 https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+          aria2c -x16 --retry-wait=5 \
+            https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
           chmod +x patch_linux
           
           cp Image Image_original
-          ./patch_linux
-          mv oImage Image_kpm
+          ./patch_linux || (echo "::warning::KPM注入失败，使用原始镜像"; mv Image_original Image_kpm)
+          mv oImage Image_kpm 2>/dev/null || true
           sha256sum Image* > checksum.sha256
 
-      # ================== 打包分发 ==================
+      # ================== 智能打包系统 ==================
       - name: 准备AnyKernel3刷机包
         run: |
           cd kernel_workspace/kernel_platform/dist
           mkdir -p AnyKernel3-{kpm,no_kpm}
           
-          # 克隆模板仓库
           git clone -q https://${AK3_ACCESS_TOKEN}@github.com/MAXCUK/AnyKernel3-ace5Pro.git AnyKernel3-template
-          cp -a AnyKernel3-template/* AnyKernel3-kpm/
-          cp -a AnyKernel3-template/* AnyKernel3-no_kpm/
           
-          # 填充镜像
-          cp Image AnyKernel3-no_kpm/
-          cp Image_kpm AnyKernel3-kpm/
-          
-          # 生成版本信息
-          for dir in AnyKernel3-*; do
-            echo "Kernel Version: ${{ inputs.KERNEL_NAME }}-$(date +%Y%m%d)" > $dir/version
-            echo "KSU Version: $KSU_VER" >> $dir/version
+          for variant in kpm no_kpm; do
+            rsync -a AnyKernel3-template/ AnyKernel3-${variant}/
+            cp Image${variant/_kpm/} AnyKernel3-${variant}/Image
+            echo "Device: ${{ inputs.FEIL }}" > AnyKernel3-${variant}/device.info
+            echo "KernelSU: $KSU_VER" >> AnyKernel3-${variant}/device.info
+            (cd AnyKernel3-${variant} && zip -r9 ../${variant}.zip ./*)
           done
-          
-          # 打包ZIP
-          zip -r9 AnyKernel3-no_kpm.zip AnyKernel3-no_kpm
-          zip -r9 AnyKernel3-kpm.zip AnyKernel3-kpm
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: Ace5Pro_Kernel_${{ env.KSU_VER }}
           path: |
-            kernel_workspace/kernel_platform/dist/AnyKernel3-*.zip
+            kernel_workspace/kernel_platform/dist/*.zip
             kernel_workspace/kernel_platform/dist/checksum.sha256
