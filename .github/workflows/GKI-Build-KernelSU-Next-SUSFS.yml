@@ -1,172 +1,161 @@
-name: oneplus_13t GKI Max Build
+name: GKI Kernel Builder Pro
+
 on:
   workflow_dispatch:
     inputs:
       CPU:
-        description: "SoC平台分支"
+        description: "SoC平台分支 (e.g. sm8750)"
         required: true
         default: 'sm8750'
       FEIL:
-        description: "设备配置文件"
+        description: "设备配置文件 (e.g. oneplus_13t)"
         required: true
         default: 'oneplus_13t'
-      CPUD:
-        description: "处理器代号"
-        required: true
-        default: 'sun'
       ANDROID_VERSION:
-        description: "安卓版本"
+        description: "安卓版本 (e.g. android15)"
         required: true
         default: 'android15'
       KERNEL_VERSION:
-        description: "内核版本"
+        description: "内核版本 (e.g. 6.6)"
         required: true
         default: '6.6'
       KERNEL_NAME:
-        description: "自定义内核名称"
+        description: "自定义内核标识"
         required: true
         default: '-Android15-8-@'
+
+env:
+  CCACHE_DIR: /github/workspace/.ccache
+  SWAPFILE: /swapfile16g
+  WORKSPACE: /github/workspace/kernel_workspace
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      AK3_ACCESS_TOKEN: ${{ secrets.AK3_ACCESS_TOKEN }}
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      USE_CCACHE: 1
+    timeout-minutes: 180
 
     steps:
-      - name: 初始化工作空间
-        uses: actions/checkout@v4
+    - name: 初始化工作区
+      uses: actions/checkout@v4
+      with:
+        path: ${{ env.WORKSPACE }}
 
-      - name: 配置构建缓存
-        uses: actions/cache@v3
-        with:
-          path: |
-            ${{ env.CCACHE_DIR }}
-            kernel_workspace/.repo
-          key: ${{ runner.os }}-kernel-${{ github.event.inputs.CPU }}-${{ hashFiles('.github/workflows/*.yml') }}
+    - name: 配置缓存
+      uses: actions/cache@v3
+      with:
+        path: |
+          ${{ env.CCACHE_DIR }}
+          ${{ env.WORKSPACE }}/.repo
+        key: ${{ runner.os }}-kernel-${{ inputs.CPU }}-${{ hashFiles('.github/workflows/**') }}
 
-      - name: 安装编译依赖
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            git-core python3 python3-pip curl gnupg flex bison build-essential \
-            zip libssl-dev libelf-dev bc ccache rsync kmod cpio xxd
+    - name: 系统优化配置
+      run: |
+        # 清理系统空间
+        sudo swapoff -a || true
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+        sudo apt-get clean
+        
+        # 创建16GB交换空间
+        sudo fallocate -l 16G $SWAPFILE
+        sudo chmod 600 $SWAPFILE
+        sudo mkswap $SWAPFILE
+        sudo swapon $SWAPFILE
+        free -h
 
-      - name: 部署Repo工具
-        run: |
-          sudo curl -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-          sudo chmod a+x /usr/local/bin/repo
-          repo version
+    - name: 安装编译依赖
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y \
+          repo python3-venv ccache build-essential flex bison \
+          libssl-dev libelf-dev zlib1g-dev patchelf
 
-      - name: 初始化内核仓库
-        run: |
-          mkdir -p kernel_workspace
-          cd kernel_workspace
-          repo init -u https://github.com/MAXCUK/kernel_manifest.git \
-            -b refs/heads/oneplus/${{ github.event.inputs.CPU }} \
-            -m ${{ github.event.inputs.FEIL }}.xml \
-            --depth=1
+    - name: 初始化代码仓库
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+          -b refs/heads/oneplus/${{ inputs.CPU }} \
+          -m ${{ inputs.FEIL }}.xml \
+          --depth=1 \
+          --repo-url=https://gerrit.googlesource.com/git-repo
 
-      - name: 同步源代码
-        run: |
-          cd kernel_workspace
-          repo sync -c -j$(nproc) \
-            --force-sync \
-            --no-clone-bundle \
-            --no-tags
+    - name: 同步源代码
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        for i in {1..5}; do
+          repo sync -c -j$(nproc) --force-sync --no-tags && break
+          find .repo -name '*.lock' -delete
+          sleep $((i * 20))
+        done
 
-      - name: 清理保护符号
-        run: |
-          find kernel_workspace -name "abi_gki_protected_exports_*" -delete
+    - name: 应用内核补丁
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        # 集成KernelSU
+        cd kernel_platform
+        curl -sSL "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
+        KSU_VERSION=$(($(git -C KernelSU rev-list --count main) + 10606))
+        echo "KSU_VERSION=${KSU_VERSION}" >> $GITHUB_ENV
 
-      - name: 集成KernelSU
-        run: |
-          cd kernel_workspace/kernel_platform
-          curl -sSL "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
-          cd KernelSU
-          KSU_VERSION=$(($(git rev-list --count HEAD) + 10606))
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=$KSU_VERSION/" kernel/Makefile
+        # 应用SUSFS补丁
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }}
+        cp -v susfs4ksu/kernel_patches/50_add_susfs_in_gki-*.patch common/
+        rsync -a susfs4ksu/kernel_patches/{fs,include/linux}/* common/
 
-      - name: 部署SUSFS补丁
-        run: |
-          cd kernel_workspace
-          git clone --filter=blob:none --single-branch \
-            https://gitlab.com/simonpunk/susfs4ksu.git \
-            -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
-          
-          git clone --depth=1 https://github.com/ExmikoN/SukiSU_patch
+        # 应用LZ4K补丁
+        git clone https://github.com/ExmikoN/SukiSU_patch
+        cp -r SukiSU_patch/other/lz4k/{include,lib,crypto}/* common/
 
-          # 精确复制补丁文件
-          cp -vf susfs4ksu/kernel_patches/50_add_susfs_in_gki-*.patch kernel_platform/common/
-          rsync -av susfs4ksu/kernel_patches/fs/ kernel_platform/common/fs/
-          rsync -av susfs4ksu/kernel_patches/include/linux/ kernel_platform/common/include/linux/
+    - name: 内核配置
+      working-directory: ${{ env.WORKSPACE }}/kernel_platform
+      run: |
+        # 修改版本标识
+        sed -i "s/res=\\\$res\\\$(cat \\\"\\\$file\\\")/res='${{ inputs.KERNEL_NAME }}'/" common/scripts/setlocalversion
 
-      - name: 应用LZ4K补丁组
-        run: |
-          cd kernel_workspace/kernel_platform
-          cp -r ../SukiSU_patch/other/lz4k/include/linux/* common/include/linux/
-          cp -r ../SukiSU_patch/other/lz4k/lib/* common/lib/
-          cp -r ../SukiSU_patch/other/lz4k/crypto/* common/crypto/
+        # 更新defconfig
+        cat <<EOF >> common/arch/arm64/configs/gki_defconfig
+        CONFIG_KSU=y
+        CONFIG_KPM=y
+        CONFIG_CRYPTO_LZ4K=y
+        CONFIG_CRYPTO_LZ4KD=y
+        EOF
 
-      - name: 修补内核源码
-        run: |
-          cd kernel_workspace/kernel_platform/common
-          patch -p1 --forward --ignore-whitespace < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
-          patch -p1 --forward < syscall_hooks.patch || true
+    - name: 编译内核
+      working-directory: ${{ env.WORKSPACE }}/kernel_platform
+      env:
+        CCACHE_DIR: ${{ env.CCACHE_DIR }}
+      run: |
+        export PATH="/usr/lib/ccache:$PATH"
+        ccache -M 20G
+        ccache -s
 
-      - name: 内核配置增强
-        run: |
-          cd kernel_workspace/kernel_platform
-          cat << EOF >> common/arch/arm64/configs/gki_defconfig
-# KernelSU核心配置
-CONFIG_KSU=y
-CONFIG_KPM=y
+        tools/bazel run --config=fast --config=stamp --lto=thin \
+          //common:kernel_aarch64_dist -- --dist_dir=dist
 
-# SUSFS模块配置
-CONFIG_KSU_SUSFS=y
-CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
-CONFIG_KSU_SUSFS_SUS_PATH=y
-CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+    - name: 打包镜像
+      working-directory: ${{ env.WORKSPACE }}/kernel_platform/dist
+      run: |
+        # 生成KPM镜像
+        curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
+        chmod +x patch_linux
+        ./patch_linux || cp Image Image_kpm
 
-# 压缩算法支持
-CONFIG_CRYPTO_LZ4HC=y
-CONFIG_CRYPTO_LZ4K=y
-CONFIG_CRYPTO_LZ4KD=y
-EOF
-          sed -i 's/check_defconfig//' common/build.config.gki
+        # 创建刷机包
+        git clone https://${{ secrets.GH_TOKEN }}@github.com/MAXCUK/AnyKernel3-ace5Pro.git
+        cp Image* AnyKernel3-ace5Pro/
+        cd AnyKernel3-ace5Pro
+        zip -r9 ../SukiSU_${{ env.KSU_VERSION }}_${{ inputs.FEIL }}_$(date +%Y%m%d).zip *
 
-      - name: 编译内核映像
-        run: |
-          cd kernel_workspace/kernel_platform
-          export PATH="/usr/lib/ccache:$PATH"
-          ccache -M 5G
-          tools/bazel run --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
+    - name: 上传制品
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-Build-${{ env.KSU_VERSION }}
+        path: ${{ env.WORKSPACE }}/kernel_platform/dist/*.zip
+        retention-days: 7
 
-      - name: 生成增强镜像
-        run: |
-          cd kernel_workspace/kernel_platform/dist
-          curl -L -o patch_linux https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.11-beta/patch_linux
-          chmod +x patch_linux
-          ./patch_linux || cp Image Image_kpm
-
-      - name: 打包刷机文件
-        run: |
-          cd kernel_workspace/kernel_platform/dist
-          git clone --depth=1 "https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-13t" AnyKernel3-no_kpm
-          git clone --depth=1 "https://${{ env.AK3_ACCESS_TOKEN }}@github.com/MAXCUK/AnyKernel3-13t" AnyKernel3-kpm
-          
-          # 确保基础文件存在
-          cp -v Image AnyKernel3-no_kpm/
-          cp -v Image_kpm AnyKernel3-kpm/Image
-          cp -v ../common/arch/arm64/boot/dts/vendor/*.dtb AnyKernel3-*/dtb/
-
-      - name: 发布构建成果
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel_${{ env.KSUVER }}
-          path: |
-            kernel_workspace/kernel_platform/dist/AnyKernel3-*/**
-          retention-days: 3
+    - name: 清理工作区
+      if: always()
+      working-directory: ${{ env.WORKSPACE }}
+      run: |
+        sudo swapoff $SWAPFILE
+        sudo rm -f $SWAPFILE
+        rm -rf kernel_platform/{KernelSU,susfs4ksu,SukiSU_patch}
