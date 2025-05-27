@@ -177,7 +177,7 @@ jobs:
       - name: Add sched_ext
         run: |
          cd kernel_workspace/kernel_platform/
-         git clone https://github.com/egcd123/sched_ext.git
+         git clone https://github.com/MAXCUK/sched_ext.git
          cp -r ./sched_ext/* ./common/kernel/sched
          rm -rf ./sched_ext/.git
          cd common/kernel/sched
@@ -206,7 +206,7 @@ jobs:
       - name: Prepare AnyKernel3 Packages
         run: |
          cd kernel_workspace/kernel_platform/dist
-         git clone https://github.com/egcd123/AnyKernel3.git AnyKernel3 --depth=1
+         git clone https://github.com/MAXCUK/AnyKernel3.git AnyKernel3 --depth=1
          rm -rf AnyKernel3/.git
          rm -f AnyKernel3/push.sh
          cp Image AnyKernel3/
