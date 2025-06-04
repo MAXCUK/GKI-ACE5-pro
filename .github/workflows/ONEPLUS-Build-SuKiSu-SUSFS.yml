@@ -25,22 +25,12 @@ on:
       KERNEL_NAME:
         description: "修改内核名称"
         required: true
-        default: '-android15-8-g013ec21bba94-abogki383916444'
+        default: '-android15-8-@'
       ENABLE_KPM:
         description: "启用kpm"
         required: false
         default: false
         type: boolean
-      local_version:
-        description: '是否修改内核后缀名？ (默认"-4k")'
-        required: false
-        default: '-4k'
-        type: string
-      sukisu_version:
-        description: "自定义sukisu版本号"
-        required: true
-        default: "13000"
-        
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -83,20 +73,16 @@ jobs:
          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
          
-      - name: Set up and inject custom SukiSU version
+      - name: Set up SukiSU
         run: |
          cd kernel_workspace/kernel_platform
          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
-         cd KernelSU
-         KSU_VERSION="${{ github.event.inputs.sukisu_version }}"
+         cd ./KernelSU
+         KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-         sed -i "/ifeq.*\.git/,/endif/c\\
-         KSU_VERSION := $KSU_VERSION\\
-         ccflags-y += -DKSU_VERSION=\$(KSU_VERSION)\\
-         \$(info -- SukiSU version: \$(KSU_VERSION))
-         " kernel/Makefile
-         echo "✅ Injected SukiSU version: $KSU_VERSION"
-
+         export KSU_VERSION=$KSU_VERSION
+         sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+        
       - name: Set up SUSFS & apply patches
         run: |
          set -e
@@ -138,13 +124,6 @@ jobs:
          else
          echo "❗ lz4kd patch not found for kernel version ${{ inputs.KERNEL_VERSION }}"
          fi
-
-      - name: Set CONFIG_LOCALVERSION
-        if: ${{ inputs.local_version != '-4k' }}
-        run: |
-         cd kernel_workspace/kernel_platform
-         echo "Using local_version: ${{ inputs.local_version }}"
-         sed -i "s/CONFIG_LOCALVERSION=\"-4k\"/CONFIG_LOCALVERSION=\"${{ inputs.local_version }}\"/" ./common/arch/arm64/configs/gki_defconfig
            
       - name: Add SUSFS Configuration Settings
         run: |
