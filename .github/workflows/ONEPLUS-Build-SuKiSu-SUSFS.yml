@@ -1,4 +1,4 @@
-name: ace5pro
+name: ace5pro max
 on:
   workflow_dispatch:
     inputs:
